@@ -1,4 +1,18 @@
-var device = require('iotivity-node')('client'),
+// Copyright 2016 Intel Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+var client = require('iotivity-node').client,
     debuglog = require('util').debuglog('gateway-server'),
     fs = require('fs'),
     rules = require('./rules-engine/rules_engine'),
@@ -156,7 +170,7 @@ function updateProperties(Type, values)
         debuglog('Sending Update to ' + Type + ' resourceId:' + resourceId);
 
         resource.properties = values;
-        device.update(resource);
+        client.update(resource);
     } else {
         debuglog('No ' + Type + ' online');
     }
@@ -180,85 +194,90 @@ function obsReqCB(payload, resourceId) {
 
 //---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-function observeResource(event) {
-    debuglog('Resource changed:' + JSON.stringify(event.resource.properties, null, 4));
+function resourceUpdate(resource) {
+    if ('properties' in resource) {
+        debuglog('Resource updated:' + JSON.stringify(resource.properties, null, 4));
 
-    if ('properties' in event.resource) {
-        var resourceId = event.resource.id.deviceId + ":" + event.resource.id.path;
-        obsReqCB(event.resource.properties, resourceId);
+        var resourceId = resource.deviceId + ":" + resource.resourcePath;
+        obsReqCB(resource.properties, resourceId);
     }
 }
 
-function deleteResource(event) {
-    var id = this.id.deviceId + ":" + this.id.path;
+// Stop observing the resource when it has been deleted from the OCF network.
+function deleteResource() {
+    var id = this.deviceId + ":" + this.resourcePath;
     debuglog('Client: deleteResource: ' + id);
 
     var resource = resourcesList[id];
     if (resource) {
-        resource.removeEventListener("change", observeResource);
+        resource.removeListener("update", resourceUpdate);
         delete resourcesList[id];
     }
 }
 
+// Stop observing resources when a device is lost.
+client.on("devicelost", function(device) {
+    debuglog('Client: devicelost: ' + device.uuid);
+
+    for (var index in resourcesList) {
+        var resource = resourcesList[index];
+        if (resource && resource.deviceId === device.uuid) {
+            resource.removeListener("update", resourceUpdate);
+            delete resourcesList[index];
+        }
+    }
+});
+
 // Add a listener that will receive the results of the discovery
-device.addEventListener('resourcefound', function(event) {
+client.on("resourcefound", function(resource) {
     // If the resource has identified by deviceId and path,
     // then we don't start observe.
-    var resourceId = resourcesList[event.resource.id.deviceId + ":" + event.resource.id.path];
+    var resourceId = resourcesList[resource.deviceId + ":" + resource.resourcePath];
 
-    if (!resourceId) {
-        debuglog('Resource found:' + JSON.stringify(event.resource, null, 4));
-        resourcesList[event.resource.id.deviceId + ":" + event.resource.id.path] = event.resource;
+    if (!resourceId && resource.observable) {
+        debuglog('Resource found:' + JSON.stringify(resource, null, 4));
+        resourcesList[resource.deviceId + ":" + resource.resourcePath] = resource;
 
         // Start observing the resource.
-        event.resource.addEventListener("change", observeResource);
+        resource.on("update", resourceUpdate);
 
         // Start observing the resource deletion.
-        event.resource.addEventListener("delete", deleteResource);
-     }
+        // FIXME: To be uncommented when iotivity-node issue#92 is fixed.
+        //resource.on("delete", deleteResource);
+    }
 });
 
 function discoverResources() {
     debuglog('Discover resources.');
-    device.findResources().then(
-        function() {
-            debuglog('Client: findResources() successful');
-        },
-        function(error) {
-            debuglog('Client: findResources() failed with ' + error +
-                ' and result ' + error.result);
-        });
-    notifyObserversTimeoutId = setTimeout(discoverResources, 5000);
+
+    client.findResources().catch(function(error) {
+        debuglog('Client: findResources() failed with ' + error);
+    });
 }
 
-// Start iotivity and set up the processing loop
-device.subscribe().then(
-    function() {
-       discoverResources();
-    },
-    function(error) {
-        debuglog('device.subscribe() failed with: ' + error);
-    });
+// Discover resources.
+discoverResources();
 
 // Exit gracefully when interrupted
 process.on('SIGINT', function() {
-  debuglog('SIGINT: Quitting...');
+    debuglog('SIGINT: Quitting...');
 
-  // Tear down the processing loop
-  if (notifyObserversTimeoutId) {
-      clearTimeout(notifyObserversTimeoutId);
-      notifyObserversTimeoutId = null;
-  }
+    // Tear down the processing loop
+    if (notifyObserversTimeoutId) {
+        clearTimeout(notifyObserversTimeoutId);
+        notifyObserversTimeoutId = null;
+    }
 
-  // Stop observing
-  for (var index in resourcesList) {
-     var resource = resourcesList[index];
-     if (resource) {
-         resource.removeEventListener("change", observeResource);
-         resource.removeEventListener("delete", deleteResource);
-     }
-  }
+    // Stop observing
+    for (var index in resourcesList) {
+        var resource = resourcesList[index];
+        if (resource) {
+            resource.removeListener("update", resourceUpdate);
+            // FIXME: To be uncommented when iotivity-node issue#92 is fixed.
+            //resource.removeListener("delete", deleteResource);
+        }
+    }
 
-  // Exit
-  process.exit(0);
+    // Exit
+    process.exit(0);
 });
