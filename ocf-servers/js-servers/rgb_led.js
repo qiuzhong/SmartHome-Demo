@@ -134,7 +134,7 @@ function checkColour(colour) {
 // and change the sensor state.
 function updateProperties(properties) {
     var input = properties.rgbValue;
-    if (!input || !mraa)
+    if (!input)
         return;
 
     var r = parseInt(input[0]);
@@ -143,7 +143,8 @@ function updateProperties(properties) {
     if (!checkColour(r) || !checkColour(g) || !checkColour(b))
         return;
 
-    setColourRGB(r, g, b);
+    if (mraa)
+        setColourRGB(r, g, b);
     rgbValue = input;
 
     debuglog('Update received. value: ', rgbValue);
