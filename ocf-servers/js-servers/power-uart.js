@@ -1,14 +1,42 @@
-var device = require('iotivity-node')('server'),
-    debuglog = require('util').debuglog('power-uart'),
+// Copyright 2016 Intel Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+var debuglog = require('util').debuglog('power-uart'),
     powerResource,
     uart,
     resourceTypeName = 'oic.r.energy.consumption',
     resourceInterfaceName = '/a/power',
     notifyObserversTimeoutId,
+    exitId,
     hasUpdate = false,
-    noObservers = true,
+    observerCount = 0,
     power1 = 100,  // For simulation only
     power2 = 1000; // Ditto
+
+// Environment variable to enable secure mode.
+var secure_mode = process.env.SECURE;
+if (secure_mode === '1' || secure_mode === 'true') {
+    // We need to create the appropriate ACLs so security will work
+    require("./config-tool/json2cbor")([{
+        href: resourceInterfaceName,
+        rel: "",
+        rt: [resourceTypeName],
+       "if": ["oic.if.baseline"]
+    }]);
+}
+
+var device = require('iotivity-node');
 
 // Require the MRAA library
 var mraa = '';
@@ -114,16 +142,18 @@ function getProperties() {
 // Set up the notification loop
 function notifyObservers() {
     var properties = getProperties();
+
+    notifyObserversTimeoutId = null;
     if (hasUpdate) {
         powerResource.properties = properties;
         hasUpdate = false;
 
         debuglog('Send observe response.');
-        device.notify(powerResource).catch(
+        powerResource.notify().catch(
             function(error) {
                 debuglog('Failed to notify observers with error: ', error);
-                noObservers = error.noObservers;
-                if (noObservers) {
+                if (error.observers.length === 0) {
+                    observerCount = 0;
                     if (notifyObserversTimeoutId) {
                         clearTimeout(notifyObserversTimeoutId);
                         notifyObserversTimeoutId = null;
@@ -134,26 +164,23 @@ function notifyObservers() {
 
     // After all our clients are complete, we don't care about any
     // more requests to notify.
-    if (!noObservers) {
+    if (observerCount > 0) {
         notifyObserversTimeoutId = setTimeout(notifyObservers, 2000);
     }
 }
 
 // Event handlers for the registered resource.
-function observeHandler(request) {
-    powerResource.properties = getProperties();
-    request.sendResponse(powerResource).catch(handleError);
-
-    noObservers = false;
-    hasUpdate = true;
-
-    if (!notifyObserversTimeoutId)
-        setTimeout(notifyObservers, 200);
-}
-
 function retrieveHandler(request) {
     powerResource.properties = getProperties();
-    request.sendResponse(powerResource).catch(handleError);
+    request.respond(powerResource).catch(handleError);
+
+    if ("observe" in request) {
+        hasUpdate = true;
+        observerCount += request.observe ? 1 : -1;
+        if (!notifyObserversTimeoutId && observerCount > 0)
+            setTimeout(notifyObservers, 200);
+    }
+
 }
 
 device.device = Object.assign(device.device, {
@@ -174,7 +201,7 @@ device.platform = Object.assign(device.platform, {
 });
 
 // Enable presence
-device.enablePresence().then(
+device.server.enablePresence().then(
     function() {
 
         // Setup uart
@@ -183,8 +210,8 @@ device.enablePresence().then(
         debuglog('Create Power resource.');
 
         // Register Power resource
-        device.register({
-            id: { path: resourceInterfaceName },
+        device.server.register({
+            resourcePath: resourceInterfaceName,
             resourceTypes: [ resourceTypeName ],
             interfaces: [ 'oic.if.baseline' ],
             discoverable: true,
@@ -196,8 +223,7 @@ device.enablePresence().then(
                 powerResource = resource;
 
                 // Add event handlers for each supported request type
-                device.addEventListener('observerequest', observeHandler);
-                device.addEventListener('retrieverequest', retrieveHandler);
+                resource.onretrieve(retrieveHandler);
             },
             function(error) {
                 debuglog('register() resource failed with: ', error);
@@ -211,12 +237,11 @@ device.enablePresence().then(
 process.on('SIGINT', function() {
     debuglog('Delete Power Resource.');
 
-    // Remove event listeners
-    device.removeEventListener('observerequest', observeHandler);
-    device.removeEventListener('retrieverequest', retrieveHandler);
+    if (exitId)
+        return;
 
     // Unregister resource.
-    device.unregister(powerResource).then(
+    powerResource.unregister().then(
         function() {
             debuglog('unregister() resource successful');
         },
@@ -225,7 +250,7 @@ process.on('SIGINT', function() {
         });
 
     // Disable presence
-    device.disablePresence().then(
+    device.server.disablePresence().then(
         function() {
             debuglog('device.disablePresence() successful');
         },
@@ -234,5 +259,5 @@ process.on('SIGINT', function() {
         });
 
     // Exit
-    process.exit(0);
+    exitId = setTimeout(function() { process.exit(0); }, 1000);
 });

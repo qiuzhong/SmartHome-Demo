@@ -1,14 +1,43 @@
-var device = require('iotivity-node')('server'),
-    debuglog = require('util').debuglog('rgb_led'),
+// Copyright 2016 Intel Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+var debuglog = require('util').debuglog('rgb_led'),
     rgbLEDResource,
     sensorPin,
     sensorState = false,
+    exitId,
+    observerCount = 0,
     resourceTypeName = 'oic.r.colour.rgb',
     resourceInterfaceName = '/a/rgbled',
     range = [0,255],
     rgbValue = [0,0,0],
     clockPin,
     dataPin;
+
+// Environment variable to enable secure mode.
+var secure_mode = process.env.SECURE;
+if (secure_mode === '1' || secure_mode === 'true') {
+    // We need to create the appropriate ACLs so security will work
+    require("./config-tool/json2cbor")([{
+        href: resourceInterfaceName,
+        rel: "",
+        rt: [resourceTypeName],
+       "if": ["oic.if.baseline"]
+    }]);
+}
+
+var device = require('iotivity-node');
 
 // Require the MRAA library
 var mraa = '';
@@ -139,32 +168,31 @@ function getProperties() {
 function notifyObservers(request) {
     rgbLEDResource.properties = getProperties();
 
-    device.notify(rgbLEDResource).then(
-        function() {
-            debuglog('Successfully notified observers.');
-        },
+    rgbLEDResource.notify().catch(
         function(error) {
             debuglog('Notify failed with error: ', error);
         });
 }
 
 // Event handlers for the registered resource.
-function observeHandler(request) {
-    request.sendResponse(rgbLEDResource).catch(handleError);
-    setTimeout(notifyObservers, 200);
-}
-
 function retrieveHandler(request) {
     rgbLEDResource.properties = getProperties();
-    request.sendResponse(rgbLEDResource).catch(handleError);
+    request.respond(rgbLEDResource).catch(handleError);
+
+    if ("observe" in request) {
+        observerCount += request.observe ? 1 : -1;
+        if (observerCount > 0)
+            setTimeout(notifyObservers, 200);
+    }
 }
 
-function changeHandler(request) {
-    updateProperties(request.res);
+function updateHandler(request) {
+    updateProperties(request.data);
 
     rgbLEDResource.properties = getProperties();
-    request.sendResponse(rgbLEDResource).catch(handleError);
-    setTimeout(notifyObservers, 200);
+    request.respond(rgbLEDResource).catch(handleError);
+    if (observerCount > 0)
+        setTimeout(notifyObservers, 200);
 }
 
 device.device = Object.assign(device.device, {
@@ -185,7 +213,7 @@ device.platform = Object.assign(device.platform, {
 });
 
 // Enable presence
-device.enablePresence().then(
+device.server.enablePresence().then(
     function() {
         // Setup RGB LED sensor pin.
         setupHardware();
@@ -193,8 +221,8 @@ device.enablePresence().then(
         debuglog('Create RGB LED resource.');
 
         // Register RGB LED resource
-        device.register({
-            id: { path: resourceInterfaceName },
+        device.server.register({
+            resourcePath: resourceInterfaceName,
             resourceTypes: [ resourceTypeName ],
             interfaces: [ 'oic.if.baseline' ],
             discoverable: true,
@@ -206,9 +234,8 @@ device.enablePresence().then(
                 rgbLEDResource = resource;
 
                 // Add event handlers for each supported request type
-                device.addEventListener('observerequest', observeHandler);
-                device.addEventListener('retrieverequest', retrieveHandler);
-                device.addEventListener('changerequest', changeHandler);
+                resource.onretrieve(retrieveHandler);
+                resource.onupdate(updateHandler);
             },
             function(error) {
                 debuglog('register() resource failed with: ', error);
@@ -222,19 +249,17 @@ device.enablePresence().then(
 process.on('SIGINT', function() {
     debuglog('Delete RGB LED Resource.');
 
+    if (exitId)
+        return;
+
     // Turn off led before we tear down the resource.
     if (mraa) {
         rgbValue = [0,0,0];
         setColourRGB(0, 0, 0);
     }
 
-    // Remove event listeners
-    device.removeEventListener('observerequest', observeHandler);
-    device.removeEventListener('retrieverequest', retrieveHandler);
-    device.removeEventListener('changerequest', changeHandler);
-
     // Unregister resource.
-    device.unregister(rgbLEDResource).then(
+    rgbLEDResource.unregister().then(
         function() {
             debuglog('unregister() resource successful');
         },
@@ -243,7 +268,7 @@ process.on('SIGINT', function() {
         });
 
     // Disable presence
-    device.disablePresence().then(
+    device.server.disablePresence().then(
         function() {
             debuglog('device.disablePresence() successful');
         },
@@ -252,5 +277,5 @@ process.on('SIGINT', function() {
         });
 
     // Exit
-    process.exit(0);
+    exitId = setTimeout(function() { process.exit(0); }, 1000);
 });

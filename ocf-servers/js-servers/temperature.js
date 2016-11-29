@@ -1,15 +1,29 @@
-var device = require('iotivity-node')('server'),
-    debuglog = require('util').debuglog('temperature'),
+var debuglog = require('util').debuglog('temperature'),
     temperatureResource,
     sensorPin,
     beta = 3975, // Value of the thermistor
     resourceTypeName = 'oic.r.temperature',
     resourceInterfaceName = '/a/temperature',
     notifyObserversTimeoutId,
+    exitId,
+    observerCount = 0,
     hasUpdate = false,
-    noObservers = false,
     temperature = 0,
     desiredTemperature = 0;
+
+// Environment variable to enable secure mode.
+var secure_mode = process.env.SECURE;
+if (secure_mode === '1' || secure_mode === 'true') {
+    // We need to create the appropriate ACLs so security will work
+    require("./config-tool/json2cbor")([{
+        href: resourceInterfaceName,
+        rel: "",
+        rt: [resourceTypeName],
+       "if": ["oic.if.baseline"]
+    }]);
+}
+
+var device = require('iotivity-node');
 
 // Units for the temperature.
 var units = {
@@ -121,16 +135,18 @@ function updateProperties(properties) {
 // Set up the notification loop
 function notifyObservers() {
     var properties = getProperties(units.C);
+
+    notifyObserversTimeoutId = null;
     if (hasUpdate) {
         temperatureResource.properties = properties;
         hasUpdate = false;
 
         debuglog('Send the response: ', temperature);
-        device.notify(temperatureResource).catch(
+        temperatureResource.notify().catch(
             function(error) {
                 debuglog('Failed to notify observers with error: ', error);
-                noObservers = error.noObservers;
-                if (noObservers) {
+                if (error.observers.length === 0) {
+                    observerCount = 0;
                     if (notifyObserversTimeoutId) {
                         clearTimeout(notifyObserversTimeoutId);
                         notifyObserversTimeoutId = null;
@@ -141,23 +157,12 @@ function notifyObservers() {
 
     // After all our clients are complete, we don't care about any
     // more requests to notify.
-    if (!noObservers) {
+    if (observerCount > 0) {
         notifyObserversTimeoutId = setTimeout(notifyObservers, 2000);
     }
 }
 
 // Event handlers for the registered resource.
-function observeHandler(request) {
-    temperatureResource.properties = getProperties(units.C);
-    request.sendResponse(temperatureResource).catch(handleError);
-
-    noObservers = false;
-    hasUpdate = true;
-
-    if (!notifyObserversTimeoutId)
-        setTimeout(notifyObservers, 200);
-}
-
 function retrieveHandler(request) {
     if (request.queryOptions && request.queryOptions.units) {
         if (!(request.queryOptions.units in units)) {
@@ -176,10 +181,16 @@ function retrieveHandler(request) {
         temperatureResource.properties = getProperties(units.C);
     }
 
-    request.sendResponse(temperatureResource).catch(handleError);
+    request.respond(temperatureResource).catch(handleError);
+
+    if ("observe" in request) {
+        observerCount += request.observe ? 1 : -1;
+        if (observerCount > 0)
+            setTimeout(notifyObservers, 200);
+    }
 }
 
-function changeHandler(request) {
+function updateHandler(request) {
     var ret = updateProperties(request.res);
 
     if (!ret) {
@@ -194,9 +205,10 @@ function changeHandler(request) {
     }
 
     temperatureResource.properties = getProperties(units.C);
-    request.sendResponse(temperatureResource).catch(handleError);
+    request.respond(temperatureResource).catch(handleError);
 
-    setTimeout(notifyObservers, 200);
+    if (observerCount > 0)
+        setTimeout(notifyObservers, 200);
 }
 
 device.device = Object.assign(device.device, {
@@ -217,7 +229,7 @@ device.platform = Object.assign(device.platform, {
 });
 
 // Enable presence
-device.enablePresence().then(
+device.server.enablePresence().then(
     function() {
 
         // Setup Temperature sensor pin.
@@ -226,8 +238,8 @@ device.enablePresence().then(
         debuglog('Create Temperature resource.');
 
         // Register Temperature resource
-        device.register({
-            id: { path: resourceInterfaceName },
+        device.server.register({
+            resourcePath: resourceInterfaceName,
             resourceTypes: [ resourceTypeName ],
             interfaces: [ 'oic.if.baseline' ],
             discoverable: true,
@@ -239,9 +251,8 @@ device.enablePresence().then(
                 temperatureResource = resource;
 
                 // Add event handlers for each supported request type
-                device.addEventListener('observerequest', observeHandler);
-                device.addEventListener('retrieverequest', retrieveHandler);
-                device.addEventListener('changerequest', changeHandler);
+                resource.onretrieve(retrieveHandler);
+                resource.onupdate(updateHandler);
             },
             function(error) {
                 debuglog('register() resource failed with: ', error);
@@ -255,13 +266,11 @@ device.enablePresence().then(
 process.on('SIGINT', function() {
     debuglog('Delete temperature Resource.');
 
-    // Remove event listeners
-    device.removeEventListener('observerequest', observeHandler);
-    device.removeEventListener('retrieverequest', retrieveHandler);
-    device.removeEventListener('changerequest', changeHandler);
+    if (exitId)
+        return;
 
     // Unregister resource.
-    device.unregister(temperatureResource).then(
+    temperatureResource.unregister().then(
         function() {
             debuglog('unregister() resource successful');
         },
@@ -270,7 +279,7 @@ process.on('SIGINT', function() {
         });
 
     // Disable presence
-    device.disablePresence().then(
+    device.server.disablePresence().then(
         function() {
             debuglog('device.disablePresence() successful');
         },
@@ -279,5 +288,5 @@ process.on('SIGINT', function() {
         });
 
     // Exit
-    process.exit(0);
+    exitId = setTimeout(function() { process.exit(0); }, 1000);
 });
