@@ -17,7 +17,11 @@ This folder contains JavaScript implementation of various OCF servers, such as:
 All the OCF servers in these folders are written in JavaScript and leverage `iotivity-node` (IoTivity JavaScript bindings) as well as the MRAA JavaScript bindings to access and control the busses (e.g. I2C, GPIO, Analog, etc.).
 
 * Have the HW hooked up to your board (see table below)
-* `node <ocf-server>.js &`
+* Transfer the `ocf-servers` directory from this repository to your device.
+* Install Node.js dependencies which are not provided by the OS (you need a live network connection).
+ - `npm install uuid bindings lodash osenv sha.js shelljs`
+* Start the OCF server.
+ - `node js-servers/<ocf-server>.js &`
 * Et voila...
 
 ## Setting up the HW devices/sensors
