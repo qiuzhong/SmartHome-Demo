@@ -1,3 +1,17 @@
+// Copyright 2016 Intel Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 var debuglog = require('util').debuglog('temperature'),
     temperatureResource,
     sensorPin,
@@ -9,7 +23,7 @@ var debuglog = require('util').debuglog('temperature'),
     observerCount = 0,
     hasUpdate = false,
     temperature = 0,
-    desiredTemperature = 0;
+    desiredTemperature = {};
 
 // Environment variable to enable secure mode.
 var secure_mode = process.env.SECURE;
@@ -96,7 +110,7 @@ function getProperties(tempUnit) {
                 break;
         }
 
-        if (temperature >= desiredTemperature)
+        if (!desiredTemperature[tempUnit] || temperature >= desiredTemperature[tempUnit])
             hasUpdate = true;
     } else {
         // Simulate real sensor behavior. This is useful
@@ -119,14 +133,18 @@ function getProperties(tempUnit) {
 }
 
 function updateProperties(properties) {
-    var range_temp = getRange(units.C).split(',');
+    if (!properties.temperature)
+        return false;
+
+    var units = properties.units ? properties.units : units.C;
+    var range_temp = getRange(units).split(',');
     var min = parseInt(range_temp[0]);
     var max = parseInt(range_temp[1]);
 
     if (properties.temperature < min || properties.temperature > max)
         return false;
 
-    desiredTemperature = properties.temperature;
+    desiredTemperature[units] = properties.temperature;
     debuglog('Desired value: ', desiredTemperature);
 
     return true;
@@ -164,23 +182,7 @@ function notifyObservers() {
 
 // Event handlers for the registered resource.
 function retrieveHandler(request) {
-    if (request.queryOptions && request.queryOptions.units) {
-        if (!(request.queryOptions.units in units)) {
-            // Format the error properties.
-            var error = {
-                id: 'temperature',
-                units: request.queryOptions.units
-            };
-
-            request.sendError(error);
-            return;
-        }
-
-        temperatureResource.properties = getProperties(request.queryOptions.units);
-    } else {
-        temperatureResource.properties = getProperties(units.C);
-    }
-
+    temperatureResource.properties = getProperties(units.C);
     request.respond(temperatureResource).catch(handleError);
 
     if ("observe" in request) {
@@ -191,16 +193,12 @@ function retrieveHandler(request) {
 }
 
 function updateHandler(request) {
-    var ret = updateProperties(request.res);
+    var ret = updateProperties(request.data);
 
     if (!ret) {
         // Format the error properties.
-        var error = {
-            id: 'temperature',
-            range: getRange(units.C)
-        };
-
-        request.sendError(error);
+        var err = new Error("Invalid input");
+        request.respondWithError(err);
         return;
     }
 
@@ -209,6 +207,27 @@ function updateHandler(request) {
 
     if (observerCount > 0)
         setTimeout(notifyObservers, 200);
+}
+
+function translateHandler(request) {
+    if (request.units) {
+        if (!(request.units in units)) {
+            // Format the error properties.
+            var error = {
+                id: 'temperature',
+                units: request.units,
+                error: request.units + " is an invalid temperature unit."
+            };
+
+            return error;
+        }
+
+        temperatureResource.properties = getProperties(request.units);
+    } else {
+        temperatureResource.properties = getProperties(units.C);
+    }
+
+    return temperatureResource.properties;
 }
 
 device.device = Object.assign(device.device, {
@@ -253,6 +272,7 @@ device.server.enablePresence().then(
                 // Add event handlers for each supported request type
                 resource.onretrieve(retrieveHandler);
                 resource.onupdate(updateHandler);
+                resource.ontranslate(translateHandler);
             },
             function(error) {
                 debuglog('register() resource failed with: ', error);
