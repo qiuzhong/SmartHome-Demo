@@ -23,7 +23,7 @@ def hash_str(raw_str):
 DEFAULT_GATEWAYS = [
     {
         'name': 'lab',
-        'url': 'https://10.239.76.66:8000/',
+        'url': 'http://10.239.115.34:8882/',
         'address': 'No. 880, Zi Xing Rd, Shanghai',
         'latitude': '31.020780',
         'longitude': '121.454648',
